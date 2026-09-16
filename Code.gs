@@ -1,11 +1,3 @@
-function onOpen() {
-  var ui = SpreadsheetApp.getUi();
-  ui.createMenu('Weekly Email')
-      .addItem('Send All', 'sendWeeklyEmail')
-      .addItem('Preview', 'previewWeeklyEmail')
-      .addToUi();
-}
-
 /*
  * Weekly Email Sender
  *
@@ -16,11 +8,11 @@ function onOpen() {
  * - Data begins on row 2.
  *
  * Reserved columns:
- * - Date:        Literal date text used in the email body.
- * - Send To:      Recipient address placed in BCC.
- * - Send To Name:  (Optional) Creates a "Dear <name>" in the message body
- * - Send Email:   (Optional) Checkbox; row is processed only when checked.
- * - Email Sent:  If "yes", the row is skipped. After a successful send,
+ * - Date         Literal date text used in the email body.
+ * - Send To      Recipient address placed in BCC.
+ * - Send To Name (Optional) Creates a "Dear <name>" in the message body
+ * - Send Email   (Optional) Checkbox; row is processed only when checked.
+ * - Email Sent   If "yes", the row is skipped. After a successful send,
  *                this value is set to "yes".
  *
  * All other labeled columns are included automatically in the email body.
@@ -29,15 +21,53 @@ function onOpen() {
  * "Send All" sends the email and updates the spreadsheet marking Email Sent.
  * "Preview" action preview emails in a Sheets dialog without
  * sending them or marking them as sent.
+ * 
+ * Author: Tom Cooper, 9/15/26
  */
 
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Weekly Email')
+    .addItem('Send All', 'sendWeeklyEmail')
+    .addItem('Preview', 'previewWeeklyEmail')
+    .addSeparator()
+    .addItem('About...', 'aboutInfo')
+    .addToUi();
+
+  try {
+    updateCustomizationValidation();
+  } catch (error) {
+    console.error(
+      `Customization validation failed: ${error.message}`
+    );
+  }
+}
+
+const APP_VERSION = '1.0.0';
+
+function aboutInfo() {
+  const ui = SpreadsheetApp.getUi();
+
+  ui.alert(
+    'Weekly Parent Emails',
+    `Version ${APP_VERSION}
+
+Creates personalized parent emails from spreadsheet rows.
+
+Each worksheet can have its own letterhead, introduction, and footer. Use Preview to review messages before sending.
+
+© Whitinsville Christian School`,
+    ui.ButtonSet.OK
+  );
+}
+
 const RESERVED = {
-  DATE: "Date:",
-  STUDENT: "Student Name:",
-  SEND_TO: "Send To:",
-  SEND_TO_NAME: "Send To Name:",
-  SEND_EMAIL: "Send Email:",
-  EMAIL_SENT: "Email Sent:"
+  DATE: "Date",
+  STUDENT: "Student Name",
+  SEND_TO: "Send To",
+  SEND_TO_NAME: "Send To Name",
+  SEND_EMAIL: "Send Email",
+  EMAIL_SENT: "Email Sent"
 };
 
 const RESERVED_HEADERS = new Set(Object.values(RESERVED));
@@ -120,7 +150,9 @@ function getEmailContext() {
     .getRange(2, 1, lastRow - 1, lastColumn)
     .getValues();
 
-  return { sender, sheet, headers, columns, rows };
+  const customization = getEmailCustomization(sheet.getName());
+
+  return { sender, sheet, headers, columns, rows, customization };
 }
 
 
@@ -159,18 +191,27 @@ function prepareEmail(row, sheetRow, context) {
     values.DATE,
     sendToName,
     title,
+    context.customization.introduction,
+    context.customization.footer
   );
 
   return {
     sendTo: values.SEND_TO,
     sender: context.sender,
     subject,
-    message
+    message,
+    inlineImages: {
+      letterhead: context.customization.letterhead
+    }
   };
 }
 
-
 function getRequiredValues(row, sheetRow, columns) {
+  // Ignore completely empty rows.
+  if (row.every(cell => String(cell || "").trim() === "")) {
+    return null;
+  }
+
   const values = {};
 
   for (const key of ["SEND_TO", "DATE", "STUDENT"]) {
@@ -211,10 +252,11 @@ function processEmail( email, sendFn, sheet, sheetRow, columns ) {
 }
 
 
-function sendEmailForRow({ sendTo, sender, subject, message }) {
+function sendEmailForRow({ sendTo, sender, subject, message, inlineImages }) {
   MailApp.sendEmail(sendTo, subject, "", {
     htmlBody: message,
-    bcc: sender
+    bcc: sender,
+    inlineImages: inlineImages
   });
 
   // Indicate an email was successfully sent. It will throw if failure.
@@ -223,20 +265,28 @@ function sendEmailForRow({ sendTo, sender, subject, message }) {
 
 
 function showPreviewDialog(previews) {
-  const html = previews.length === 0
-    ? "<p>No emails would be sent.</p>"
-    : previews.map((email, index) => `
-        <div style="margin-bottom:24px;">
-          <h3>Email ${index + 1}</h3>
-          <p>
-            <b>To:</b> ${escapeHtml(email.sendTo)}<br>
-            <b>BCC:</b> ${escapeHtml(email.sender)}<br>
-            <b>Subject:</b> ${escapeHtml(email.subject)}
-          </p>
-          <hr>
-          ${email.message}
-        </div>
-      `).join("");
+  if (previews.length === 0) {
+    return "<p>No emails would be sent.</p>"
+  }
+  const html = previews.map((email, index) => {
+    const previewMessage = email.message.replace(
+      "cid:letterhead",
+      blobToDataUri(email.inlineImages.letterhead)
+    );
+
+    return `
+      <div style="margin-bottom:24px;">
+        <h3>Email ${index + 1}</h3>
+        <p>
+          <b>To:</b> ${escapeHtml(email.sendTo)}<br>
+          <b>BCC:</b> ${escapeHtml(email.sender)}<br>
+          <b>Subject:</b> ${escapeHtml(email.subject)}
+        </p>
+        <hr>
+        ${previewMessage}
+      </div>
+    `;
+  }).join("");
 
   const output = HtmlService
     .createHtmlOutput(`
@@ -253,6 +303,13 @@ function showPreviewDialog(previews) {
   SpreadsheetApp
     .getUi()
     .showModalDialog(output, "Email Preview");
+}
+
+
+function blobToDataUri(blob) {
+  const base64 = Utilities.base64Encode(blob.getBytes());
+
+  return `data:${blob.getContentType()};base64,${base64}`;
 }
 
 
@@ -319,9 +376,9 @@ function buildEmailBody(
   date,
   sendToName,
   title,
+  introduction,
+  footer
 ) {
-  const introduction = getNamedValue("EmailIntroduction");
-  const footer = getNamedValue("EmailFooter");
 
   const contentBlocks = headers
     .map((header, index) => [header, row[index]])
@@ -375,6 +432,11 @@ function buildEmailBody(
       .email td {
         font-size: 15px;
         line-height: 1.5;
+      }
+
+      .letterhead {
+        padding: 12px 30px 6px 30px;
+        text-align: center;
       }
 
       .header {
@@ -466,6 +528,22 @@ function buildEmailBody(
     <table class="email" role="presentation">
 
       <tr>
+        <td class="letterhead">
+          <img
+            src="cid:letterhead"
+            alt="Whitinsville Christian School"
+            style="
+              display: block;
+              width: 280px;
+              max-width: 80%;
+              height: auto;
+              margin: 0 auto;
+            "
+          >
+        </td>
+      </tr>
+
+      <tr>
         <td class="header">
           <div class="title">
             ${escapeHtml(title)}
@@ -525,6 +603,30 @@ function getNamedValue(name) {
 }
 
 
+function getImageFromCell(cell) {
+  const image = cell.getValue();
+
+  if (
+    !image ||
+    image.valueType !== SpreadsheetApp.ValueType.IMAGE
+  ) {
+    throw new Error(
+      `Expected an image in ${cell.getSheet().getName()}!${cell.getA1Notation()}.`
+    );
+  }
+
+  const url = image.getContentUrl();
+
+  if (!url) {
+    throw new Error(
+      `Could not read the image in ${cell.getA1Notation()}.`
+    );
+  }
+
+  return UrlFetchApp.fetch(url).getBlob();
+}
+
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -532,4 +634,139 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+/*
+ * Customizations
+ */
+
+const CONFIG = {
+  SHEET_NAME: "Sheet Name",
+  LETTERHEAD: "Letterhead Image",
+  INTRODUCTION: "Introduction",
+  FOOTER: "Footer"
+};
+
+const CUSTOMIZATIONS_RANGE = "Customizations";
+
+
+function updateCustomizationValidation() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const range = spreadsheet.getRangeByName(CUSTOMIZATIONS_RANGE);
+
+  if (!range) {
+    throw new Error(
+      `Named range "${CUSTOMIZATIONS_RANGE}" was not found.`
+    );
+  }
+
+  const headers = range
+    .getValues()[0]
+    .map(value => String(value || "").trim());
+
+  const columns = getConfigColumns(headers);
+
+  const sheetNames = spreadsheet
+    .getSheets()
+    .map(sheet => sheet.getName())
+    .filter(name => name !== range.getSheet().getName());
+
+  const validation = SpreadsheetApp
+    .newDataValidation()
+    .requireValueInList(sheetNames, true)
+    .setAllowInvalid(false)
+    .setHelpText(
+      "Select the sheet this customization applies to."
+    )
+    .build();
+
+  const firstDataRow = range.getRow() + 1;
+  const rowCount = range.getNumRows() - 1;
+  const sheetNameColumn =
+    range.getColumn() + columns.SHEET_NAME;
+
+  range
+    .getSheet()
+    .getRange(firstDataRow, sheetNameColumn, rowCount, 1)
+    .setDataValidation(validation);
+}
+
+
+function getEmailCustomization(sheetName) {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const range = spreadsheet.getRangeByName(CUSTOMIZATIONS_RANGE);
+
+  if (!range) {
+    throw new Error(
+      `Named range "${CUSTOMIZATIONS_RANGE}" was not found.`
+    );
+  }
+
+  const values = range.getValues();
+  const headers = values[0]
+    .map(value => String(value || "").trim());
+
+  const columns = getConfigColumns(headers);
+
+  const matches = [];
+
+  for (let i = 1; i < values.length; i++) {
+    const configuredSheetName = String(
+      values[i][columns.SHEET_NAME] || ""
+    ).trim();
+
+    if (configuredSheetName === sheetName) {
+      matches.push(i);
+    }
+  }
+
+  if (matches.length === 0) {
+    throw new Error(
+      `No customization is configured for sheet "${sheetName}".`
+    );
+  }
+
+  if (matches.length > 1) {
+    throw new Error(
+      `Sheet "${sheetName}" appears more than once in "${CUSTOMIZATIONS_RANGE}".`
+    );
+  }
+
+  const rowIndex = matches[0];
+  const sheet = range.getSheet();
+  const absoluteRow = range.getRow() + rowIndex;
+
+  const letterheadCell = sheet.getRange(
+    absoluteRow,
+    range.getColumn() + columns.LETTERHEAD
+  );
+
+  return {
+    letterhead: getImageFromCell(letterheadCell),
+    introduction: String(
+      values[rowIndex][columns.INTRODUCTION] || ""
+    ),
+    footer: String(
+      values[rowIndex][columns.FOOTER] || ""
+    )
+  };
+}
+
+
+function getConfigColumns(headers) {
+  const columns = {};
+
+  for (const [key, label] of Object.entries(CONFIG)) {
+    const index = headers.indexOf(label);
+
+    if (index === -1) {
+      throw new Error(
+        `Configuration column "${label}" is missing from "${CUSTOMIZATIONS_RANGE}".`
+      );
+    }
+
+    columns[key] = index;
+  }
+
+  return columns;
 }
